@@ -1,0 +1,24 @@
+//@version=5
+indicator("BTC 15m Netlify Feed (TradingView only)", overlay=true)
+
+// Add this script to a BTC chart on the 1-minute timeframe.
+// Create an alert: Condition = this script, event = Any alert() function call,
+// frequency = Once Per Bar Close, Webhook URL = your Netlify function URL plus ?key=YOUR_SECRET.
+
+string feedKeyNote = input.string("SET_THIS_TO_TV_WEBHOOK_KEY", "Reminder: set matching Netlify TV_WEBHOOK_KEY")
+int barsToSend = input.int(90, "Candles to send", minval=60, maxval=180)
+
+num(float x) => na(x) ? "0" : str.tostring(x, format.mintick)
+
+if barstate.isconfirmed and bar_index >= barsToSend
+    string bars = "["
+    for i = barsToSend - 1 to 0
+        string one = (i == barsToSend - 1 ? "" : ",") + "{\"t\":" + str.tostring(time[i]) + ",\"o\":" + num(open[i]) + ",\"h\":" + num(high[i]) + ",\"l\":" + num(low[i]) + ",\"c\":" + num(close[i]) + ",\"v\":" + num(volume[i]) + "}"
+        bars += one
+    bars += "]"
+    float change15 = close[15] != 0 ? (close / close[15] - 1) * 100 : 0
+    string msg = "{\"schema\":\"tv-btc-15m-v1\",\"symbol\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"barTime\":" + str.tostring(time) + ",\"price\":" + num(close) + ",\"change15\":" + str.tostring(change15) + ",\"candles\":" + bars + "}"
+    alert(msg, alert.freq_once_per_bar_close)
+
+plot(ta.ema(close, 9), "EMA 9", color=color.teal)
+plot(ta.ema(close, 21), "EMA 21", color=color.orange)
