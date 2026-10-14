@@ -1,28 +1,91 @@
-import { getStore } from '@netlify/blobs';
 
-export default async (request) => {
-  const store = getStore('tradingview-btc-feed');
-  if (request.method === 'GET') {
-    const latest = await store.get('latest', { type: 'json' });
-    if (!latest) return Response.json({ error: 'No TradingView alert received yet' }, { status: 404 });
-    return Response.json(latest, { headers: { 'Cache-Control': 'no-store' } });
-  }
-  if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
-  const expected = process.env.TV_WEBHOOK_KEY;
-  const supplied = new URL(request.url).searchParams.get('key');
-  if (!expected || !supplied || supplied !== expected) return new Response('Unauthorized', { status: 401 });
-  let payload;
-  try { payload = await request.json(); } catch { return new Response('Invalid JSON', { status: 400 }); }
-  if (payload?.schema !== 'tv-btc-15m-v1' || !Array.isArray(payload.candles) || payload.candles.length < 60 || !Number.isFinite(Number(payload.price))) {
-    return new Response('Invalid TradingView payload', { status: 400 });
-  }
-  const clean = {
-    symbol: String(payload.symbol || 'BTC'), timeframe: String(payload.timeframe || '1'),
-    price: Number(payload.price), change15: Number(payload.change15 || 0),
-    candles: payload.candles.slice(-180).map(c => ({ t:Number(c.t), o:Number(c.o), h:Number(c.h), l:Number(c.l), c:Number(c.c), v:Number(c.v) })),
-    barTime: Number(payload.barTime || Date.now()), receivedAt: Date.now()
+exports.handler = async () => {
+  const headers = {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*"
   };
-  if (clean.candles.some(c => ![c.t,c.o,c.h,c.l,c.c,c.v].every(Number.isFinite))) return new Response('Invalid candle values', { status: 400 });
-  await store.setJSON('latest', clean);
-  return Response.json({ ok: true, receivedAt: clean.receivedAt });
+
+  try {
+    const feedUrl = process.env.TV_FEED_URL;
+
+    if (!feedUrl) {
+      return {
+        statusCode: 503,
+        headers,
+        body: JSON.stringify({
+          error: "TradingView feed is not configured",
+          source: "TradingView",
+          candles: []
+        })
+      };
+    }
+
+    const response = await fetch(feedUrl, {
+      headers: { Accept: "application/json" }
+    });
+
+    if (!response.ok) {
+      throw new Error(`Feed returned HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const raw = Array.isArray(data)
+      ? data
+      : data.candles;
+
+    if (!Array.isArray(raw)) {
+      throw new Error("Feed did not return a candles array");
+    }
+
+    const minute = 60000;
+    const currentMinute = Math.floor(Date.now() / minute) * minute;
+
+    const candles = raw
+      .map(c => ({
+        time: Number(c.time),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+        volume: Number(c.volume ?? 0)
+      }))
+      .filter(c =>
+        Number.isFinite(c.time) &&
+        Number.isFinite(c.open) &&
+        Number.isFinite(c.high) &&
+        Number.isFinite(c.low) &&
+        Number.isFinite(c.close) &&
+        c.time < currentMinute &&
+        c.open > 0 &&
+        c.low <= c.high &&
+        c.low <= Math.min(c.open, c.close) &&
+        c.high >= Math.max(c.open, c.close)
+      )
+      .sort((a, b) => a.time - b.time);
+
+    if (!candles.length) {
+      throw new Error("No completed one-minute candles available");
+    }
+
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        source: "TradingView",
+        symbol: "BTCUSD",
+        interval: "1m",
+        candles: candles.slice(-500)
+      })
+    };
+  } catch (error) {
+    return {
+      statusCode: 502,
+      headers,
+      body: JSON.stringify({
+        error: error.message,
+        candles: []
+      })
+    };
+  }
 };
