@@ -1,24 +1,117 @@
-//@version=5
-indicator("BTC 15m Netlify Feed (TradingView only)", overlay=true)
 
-// Add this script to a BTC chart on the 1-minute timeframe.
-// Create an alert: Condition = this script, event = Any alert() function call,
-// frequency = Once Per Bar Close, Webhook URL = your Netlify function URL plus ?key=YOUR_SECRET.
+ //@version=5
+indicator("GWOP Knows Best — BTC 15m Target Engine", overlay=true)
 
-string feedKeyNote = input.string("SET_THIS_TO_TV_WEBHOOK_KEY", "Reminder: set matching Netlify TV_WEBHOOK_KEY")
-int barsToSend = input.int(90, "Candles to send", minval=60, maxval=180)
+// === SETTINGS ===
+forecastBars = input.int(15, "Forecast horizon (minutes)", minval=1)
+minScore     = input.float(80, "Minimum signal score (%)", minval=50, maxval=100)
+atrMultiple  = input.float(1.0, "Target ATR multiplier", minval=0.1, step=0.1)
+showEMAs     = input.bool(true, "Show EMA lines")
+enableAlerts = input.bool(true, "Enable target alerts")
 
-num(float x) => na(x) ? "0" : str.tostring(x, format.mintick)
+// Use on a BTC chart set to 1-minute candles.
+isOneMinute = timeframe.isminutes and timeframe.multiplier == 1
 
-if barstate.isconfirmed and bar_index >= barsToSend
-    string bars = "["
-    for i = barsToSend - 1 to 0
-        string one = (i == barsToSend - 1 ? "" : ",") + "{\"t\":" + str.tostring(time[i]) + ",\"o\":" + num(open[i]) + ",\"h\":" + num(high[i]) + ",\"l\":" + num(low[i]) + ",\"c\":" + num(close[i]) + ",\"v\":" + num(volume[i]) + "}"
-        bars += one
-    bars += "]"
-    float change15 = close[15] != 0 ? (close / close[15] - 1) * 100 : 0
-    string msg = "{\"schema\":\"tv-btc-15m-v1\",\"symbol\":\"" + syminfo.tickerid + "\",\"timeframe\":\"" + timeframe.period + "\",\"barTime\":" + str.tostring(time) + ",\"price\":" + num(close) + ",\"change15\":" + str.tostring(change15) + ",\"candles\":" + bars + "}"
-    alert(msg, alert.freq_once_per_bar_close)
+// === INDICATORS ===
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+rsi14 = ta.rsi(close, 14)
+[macdLine, signalLine, histLine] = ta.macd(close, 12, 26, 9)
+atr14 = ta.atr(14)
+vwapLine = ta.vwap(hlc3)
 
-plot(ta.ema(close, 9), "EMA 9", color=color.teal)
-plot(ta.ema(close, 21), "EMA 21", color=color.orange)
+// === DIRECTION SCORE ===
+bullPoints = (ema9 > ema21 ? 30 : 0) +
+             (rsi14 > 50 ? 20 : 0) +
+             (macdLine > signalLine ? 25 : 0) +
+             (close > vwapLine ? 25 : 0)
+
+bearPoints = (ema9 < ema21 ? 30 : 0) +
+             (rsi14 < 50 ? 20 : 0) +
+             (macdLine < signalLine ? 25 : 0) +
+             (close < vwapLine ? 25 : 0)
+
+bullScore = bullPoints
+bearScore = bearPoints
+
+direction = bullScore >= minScore and bullScore > bearScore ? 1 :
+            bearScore >= minScore and bearScore > bullScore ? -1 : 0
+
+// === ROLLING TARGET ===
+// ATR-based illustrative target distance, not a calibrated forecast.
+targetDistance = atr14 * math.sqrt(forecastBars) * atrMultiple
+
+var float targetPrice = na
+var float entryPrice = na
+var int targetDirection = 0
+var int targetBar = na
+var bool targetActive = false
+var bool targetHit = false
+
+newForecast = barstate.isconfirmed and isOneMinute and
+              direction != 0 and
+              (not targetActive or direction != targetDirection or targetHit or bar_index - targetBar >= forecastBars)
+
+if newForecast and not na(targetDistance)
+    entryPrice := close
+    targetDirection := direction
+    targetPrice := close + direction * targetDistance
+    targetBar := bar_index
+    targetActive := true
+    targetHit := false
+
+// Expire the target after the forecast window.
+if targetActive and bar_index - targetBar >= forecastBars and not targetHit
+    targetActive := false
+
+// Detect price touching or crossing the active target.
+hitNow = targetActive and not targetHit and
+         (targetDirection == 1 ? high >= targetPrice :
+          targetDirection == -1 ? low <= targetPrice : false)
+
+if hitNow
+    targetHit := true
+    targetActive := false
+
+// === DISPLAY ===
+plot(showEMAs ? ema9 : na, "EMA 9", color=color.teal)
+plot(showEMAs ? ema21 : na, "EMA 21", color=color.orange)
+
+plot(targetActive or hitNow ? targetPrice : na,
+     "15m Target", color=targetHit or hitNow ? color.lime : color.fuchsia,
+     linewidth=3, style=plot.style_linebr)
+
+plotshape(newForecast and direction == 1, title="BUY signal",
+     style=shape.labelup, location=location.belowbar,
+     color=color.green, text="BUY", textcolor=color.white)
+
+plotshape(newForecast and direction == -1, title="SELL signal",
+     style=shape.labeldown, location=location.abovebar,
+     color=color.red, text="SELL", textcolor=color.white)
+
+plotshape(hitNow, title="Target hit", style=shape.diamond,
+     location=location.abovebar, color=color.lime, size=size.large)
+
+// === ALERTS ===
+alertcondition(hitNow, "GWOP Target Hit",
+     "GWOP BTC target reached. Check the chart for the target price.")
+
+alertcondition(newForecast, "GWOP New Target",
+     "GWOP has generated a new BTC 15-minute target. Check the chart.")
+
+if enableAlerts and hitNow
+    alert('{"schema":"gwop-btc-15m-v1","event":"target_hit","symbol":"' +
+         syminfo.ticker + '","target":' + str.tostring(targetPrice, format.mintick) +
+         ',"entry":' + str.tostring(entryPrice, format.mintick) +
+         ',"direction":"' + (targetDirection == 1 ? "UP" : "DOWN") +
+         '","time":' + str.tostring(time_close) + '}',
+         alert.freq_once_per_bar)
+
+if enableAlerts and newForecast
+    alert('{"schema":"gwop-btc-15m-v1","event":"new_target","symbol":"' +
+         syminfo.ticker + '","target":' + str.tostring(targetPrice, format.mintick) +
+         ',"entry":' + str.tostring(entryPrice, format.mintick) +
+         ',"direction":"' + (targetDirection == 1 ? "UP" : "DOWN") +
+         '","score":' + str.tostring(targetDirection == 1 ? bullScore : bearScore) +
+         ',"time":' + str.tostring(time_close) + '}',
+         alert.freq_once_per_bar_close)
